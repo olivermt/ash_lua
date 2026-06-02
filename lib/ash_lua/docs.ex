@@ -632,10 +632,13 @@ defmodule AshLua.Docs do
 
   defp reserved_input_keys do
     """
-    ## Reserved input keys
+     ## Reserved input keys
 
-      * `fields` — which fields to return; selection tree (list of names and
-        nested tables). Default: primary key only.
+       * `input` — explicit Surface DSL operations pass action fields and
+         arguments inside this table. Legacy inferred operations continue to
+         pass action fields and arguments at the top level.
+       * `fields` — which fields to return; selection tree (list of names and
+         nested tables). Default: primary key only.
       * `filter` — narrow the result set by field values (list operations
         only). Shape is per-record-type; see each record type's page for the
         fields you can filter on.
@@ -702,7 +705,7 @@ defmodule AshLua.Docs do
       "# `#{AshLua.Surface.path_string(entrypoint)}`",
       "**Operation:** `#{operation_kind(action)}`",
       action_description(action),
-      input_section(action, resource, resource_lookup, type_lookup),
+      input_section(entrypoint, action, resource, resource_lookup, type_lookup),
       returns_section(action, resource_module, resource_lookup, type_lookup)
     ]
     |> Enum.reject(&is_nil/1)
@@ -720,14 +723,21 @@ defmodule AshLua.Docs do
   defp action_description(%Manifest.Action{description: ""}), do: nil
   defp action_description(%Manifest.Action{description: desc}), do: desc
 
-  defp input_section(action, resource, resource_lookup, type_lookup) do
+  defp input_section(entrypoint, action, resource, resource_lookup, type_lookup) do
+    prefix = nested_input_prefix(entrypoint)
+
     input_rows =
-      Enum.map(action.inputs, &input_row(&1, action, resource, resource_lookup, type_lookup))
+      Enum.map(
+        action.inputs,
+        &input_row(&1, action, resource, resource_lookup, type_lookup, prefix)
+      )
 
-    pk_rows = pk_rows(action, resource)
+    pk_rows = pk_rows(action, resource, prefix)
     reserved_rows = reserved_rows(action)
+    action_input_rows = input_rows ++ pk_rows
 
-    rows = input_rows ++ pk_rows ++ reserved_rows
+    rows =
+      input_container_rows(entrypoint, action_input_rows) ++ action_input_rows ++ reserved_rows
 
     if rows == [] do
       "## Input\n\n_None._"
@@ -741,7 +751,35 @@ defmodule AshLua.Docs do
     end
   end
 
-  defp input_row(%Manifest.Argument{} = input, action, resource, resource_lookup, type_lookup) do
+  defp input_container_rows(entrypoint, action_input_rows) do
+    if explicit_surface_entrypoint?(entrypoint) and action_input_rows != [] do
+      required =
+        if Enum.any?(action_input_rows, &String.contains?(&1, "| yes |")), do: "yes", else: "no"
+
+      [
+        "| `input` | table | #{required} | action fields and arguments |"
+      ]
+    else
+      []
+    end
+  end
+
+  defp nested_input_prefix(entrypoint) do
+    if explicit_surface_entrypoint?(entrypoint), do: "input.", else: ""
+  end
+
+  defp explicit_surface_entrypoint?(entrypoint) do
+    match?(%{path_source: :explicit}, AshLua.Surface.config(entrypoint))
+  end
+
+  defp input_row(
+         %Manifest.Argument{} = input,
+         action,
+         resource,
+         resource_lookup,
+         type_lookup,
+         prefix
+       ) do
     required = if not input.allow_nil? and not input.has_default?, do: "yes", else: "no"
     name = input_name(input, action, resource)
 
@@ -754,7 +792,7 @@ defmodule AshLua.Docs do
       |> Enum.reject(&(is_nil(&1) or &1 == ""))
       |> Enum.join("; ")
 
-    "| `#{name}` | #{type_link(input.type, resource_lookup, type_lookup)} | #{required} | #{notes} |"
+    "| `#{prefix}#{name}` | #{type_link(input.type, resource_lookup, type_lookup)} | #{required} | #{notes} |"
   end
 
   defp input_name(
@@ -768,7 +806,7 @@ defmodule AshLua.Docs do
 
   defp input_name(%Manifest.Argument{name: name}, _action, _resource), do: name
 
-  defp pk_rows(%Manifest.Action{type: type}, resource)
+  defp pk_rows(%Manifest.Action{type: type}, resource, prefix)
        when type in [:update, :delete, :destroy] do
     Enum.map(resource.primary_key, fn pk ->
       type_text =
@@ -779,11 +817,11 @@ defmodule AshLua.Docs do
 
       lua_name = AshLua.FieldNames.to_lua_field_name(resource.module, pk)
 
-      "| `#{lua_name}` | #{type_text} | yes | identifies the record |"
+      "| `#{prefix}#{lua_name}` | #{type_text} | yes | identifies the record |"
     end)
   end
 
-  defp pk_rows(_, _), do: []
+  defp pk_rows(_, _, _), do: []
 
   defp reserved_rows(action) do
     fields_row =
